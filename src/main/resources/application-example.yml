@@ -1,0 +1,17 @@
+# ==========================================================
+# 环境配置模板（仓库内仅保留此份示例，真实 application-{dev,prod,rc,test}.yml 已 .gitignore）
+# 使用方式：复制为 application-dev.yml 后填入本地真实值
+# ==========================================================
+
+spring:
+  datasource:
+    # MySQL 数据源示例
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/fx_dev?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+
+logging:
+  level:
+    root: INFO
+    com.hayes.base.fx: DEBUG

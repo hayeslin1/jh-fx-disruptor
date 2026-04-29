@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hayes.base.fx.mapper.FxXrInfHisMapper">
+
+    <!-- 单行 INSERT；DT_CTE 是 int 类型，与主表 varchar 不同 -->
+    <insert id="insertOne">
+        INSERT INTO fx_xr_inf_his (
+            CCY_PAIR, CHANNEL_CD, BUY_PRICE, SELL_PRICE, BL_PRICE,
+            OP_CTE, DT_CTE, TM_CTE,
+            DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH, SUCC_FLG, DELI_TYP, UTC_TIMES
+        ) VALUES (
+            #{e.ccyPair}, #{e.channelCd}, #{e.buyPrice}, #{e.sellPrice}, #{e.blPrice},
+            #{opCode}, #{todayInt}, #{now},
+            #{e.dtChannelPublish}, #{e.tmChannelPublish}, #{succFlg}, #{e.deliTyp}, #{e.utcTimes}
+        )
+    </insert>
+
+</mapper>

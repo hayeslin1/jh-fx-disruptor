@@ -1,0 +1,65 @@
+# ==========================================================
+# 主配置：仅放公共、与环境无关的内容
+# 环境相关配置放 application-{env}.yml
+# ==========================================================
+
+spring:
+  application:
+    # 应用名，用于日志、监控、注册中心识别
+    name: hayes-fx-disruptor
+  profiles:
+    # 激活环境；由 Maven 构建时通过 -Denv=xxx 替换（pom 已开启 resources filtering）
+    # 本地 IDE 直接启动时可通过 VM 参数 -Dspring.profiles.active=test 覆盖
+    active: @profile.active.env@
+
+server:
+  # 服务端口
+  port: 8080
+  servlet:
+    # 上下文路径，留空表示根路径
+    context-path: /
+
+# MyBatis-Plus 通用配置（与环境无关的部分）
+mybatis-plus:
+  # mapper xml 扫描路径
+  mapper-locations: classpath*:mapper/**/*.xml
+  # 实体类扫描包
+  type-aliases-package: com.hayes.base.fx.entity
+  configuration:
+    # 开启驼峰命名自动映射
+    map-underscore-to-camel-case: true
+    # 控制台打印 SQL，生产环境可在对应 profile 覆盖为 NoLoggingImpl
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# 日志级别（默认）
+logging:
+  level:
+    root: INFO
+    com.hayes.base.fx: DEBUG
+
+# ==========================================================
+# 业务配置（Disruptor + FX 汇率落库）
+# ==========================================================
+app:
+  disruptor:
+    # RingBuffer 容量（必须是 2 的幂），4096 对应约 4 秒的 1k QPS 缓冲
+    ring-buffer-size: 4096
+    # 并行消费 handler 数；单条两 SQL ≈ 4ms，8 提供 2× 余量
+    worker-count: 8
+    # 等待策略：blocking(稳态推荐) | yielding(低延迟) | busy-spin | sleeping
+    wait-strategy: blocking
+    # 优雅停机等待 in-flight 事件消费完的超时秒数
+    shutdown-timeout-seconds: 5
+  fx:
+    # 表中 OP_CTE / OP_UTE 的固定账号（HARD-GATE Q-A）
+    op-code: SYS_FX_RATE
+    # 银行推文缺 DELI_TYP 时的默认值（HARD-GATE Q-D）
+    default-deli-typ: "00"
+    # 启用 UPSERT 时间守卫防并发乱序覆盖（HARD-GATE Q-B）
+    order-guard-enabled: true
+    # 失败重试次数（不含首次）
+    retry-times: 3
+    # 指数退避毫秒序列，长度须 ≥ retry-times
+    retry-backoff-ms: 10,50,200
+    # 全部重试失败时写入 DLQ 表（HARD-GATE Q-C）
+    dlq-enabled: true

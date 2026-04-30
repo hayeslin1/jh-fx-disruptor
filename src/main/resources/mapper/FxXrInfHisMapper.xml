@@ -16,4 +16,23 @@
         )
     </insert>
 
+    <!--
+      批量 INSERT：用 foreach 拼多 VALUES 行，一次 SQL 写入 N 条。
+      注意：MySQL 默认单包 4MB（max_allowed_packet），调用方需控制单批大小（historyBatchMaxSize=1000）。
+    -->
+    <insert id="insertBatch">
+        INSERT INTO fx_xr_inf_his (
+            CCY_PAIR, CHANNEL_CD, BUY_PRICE, SELL_PRICE, BL_PRICE,
+            OP_CTE, DT_CTE, TM_CTE,
+            DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH, SUCC_FLG, DELI_TYP, UTC_TIMES
+        ) VALUES
+        <foreach collection="list" item="e" separator=",">
+            (
+                #{e.ccyPair}, #{e.channelCd}, #{e.buyPrice}, #{e.sellPrice}, #{e.blPrice},
+                #{opCode}, #{todayInt}, #{now},
+                #{e.dtChannelPublish}, #{e.tmChannelPublish}, #{succFlg}, #{e.deliTyp}, #{e.utcTimes}
+            )
+        </foreach>
+    </insert>
+
 </mapper>

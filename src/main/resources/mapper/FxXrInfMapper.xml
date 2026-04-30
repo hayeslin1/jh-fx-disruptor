@@ -68,4 +68,68 @@
         </choose>
     </insert>
 
+    <!--
+      批量 UPSERT：多 VALUES 一条 SQL，ON DUPLICATE KEY UPDATE 子句只写一次。
+      MySQL 的 VALUES(col) 在 UPDATE 子句里指"本行正在插入的值"——行级语义，所以
+      orderGuard 分支逐行比较时间戳的语义依旧成立。
+      注意：调用方需保证 list 非空（MyBatis foreach 空集合会拼出无效 SQL）。
+    -->
+    <insert id="upsertBatch">
+        INSERT INTO fx_xr_inf (
+            CCY_PAIR, CHANNEL_CD, BUY_PRICE, SELL_PRICE, BL_PRICE,
+            OP_CTE, DT_CTE, TM_CTE, OP_UTE, DT_UTE, TM_UTE,
+            DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH, DELI_TYP, UTC_TIMES
+        ) VALUES
+        <foreach collection="list" item="e" separator=",">
+            (
+                #{e.ccyPair}, #{e.channelCd}, #{e.buyPrice}, #{e.sellPrice}, #{e.blPrice},
+                #{opCode}, #{today}, #{now}, #{opCode}, #{today}, #{now},
+                #{e.dtChannelPublish}, #{e.tmChannelPublish}, #{e.deliTyp}, #{e.utcTimes}
+            )
+        </foreach>
+        ON DUPLICATE KEY UPDATE
+        <choose>
+            <when test="orderGuard">
+                BUY_PRICE          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(BUY_PRICE), BUY_PRICE),
+                SELL_PRICE         = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(SELL_PRICE), SELL_PRICE),
+                BL_PRICE           = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(BL_PRICE), BL_PRICE),
+                OP_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(OP_UTE), OP_UTE),
+                DT_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(DT_UTE), DT_UTE),
+                TM_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(TM_UTE), TM_UTE),
+                UTC_TIMES          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(UTC_TIMES), UTC_TIMES),
+                DT_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(DT_CHANNEL_PUBLISH), DT_CHANNEL_PUBLISH),
+                TM_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
+                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
+                                        VALUES(TM_CHANNEL_PUBLISH), TM_CHANNEL_PUBLISH)
+            </when>
+            <otherwise>
+                BUY_PRICE          = VALUES(BUY_PRICE),
+                SELL_PRICE         = VALUES(SELL_PRICE),
+                BL_PRICE           = VALUES(BL_PRICE),
+                OP_UTE             = VALUES(OP_UTE),
+                DT_UTE             = VALUES(DT_UTE),
+                TM_UTE             = VALUES(TM_UTE),
+                UTC_TIMES          = VALUES(UTC_TIMES),
+                DT_CHANNEL_PUBLISH = VALUES(DT_CHANNEL_PUBLISH),
+                TM_CHANNEL_PUBLISH = VALUES(TM_CHANNEL_PUBLISH)
+            </otherwise>
+        </choose>
+    </insert>
+
 </mapper>

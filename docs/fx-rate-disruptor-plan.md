@@ -1,8 +1,14 @@
-# FX 实时汇率 · Disruptor 接入与落库方案
+# FX 实时汇率 · Disruptor 接入与落库方案（v1 · 历史存档）
+
+> ⚠️ **已被 v2 替代**：实时逐条落库 118 ms/条，成为性能漏斗。当前架构已改为**双通道异步批量落库**，见
+> [`fx-async-batch-persist_20260430.md`](fx-async-batch-persist_20260430.md)。
+> 本文保留作为 v1 同步路径的历史设计记录。
+
+---
 
 > 目标：银行实时推送汇率（100 货币对 × 10 通道 = **1000 条/秒**），使用 Disruptor 作为内存队列，**实时逐条**落库至 `fx_xr_inf`（UPSERT 最新态，供实时查询）和 `fx_xr_inf_his`（INSERT 历史流水）。
 >
-> 文档状态：**Spec v2.1 · HARD-GATE 通过 · 执行中** · Disruptor 4.0.0 移除 WorkerPool，本版改为 N EventHandler + modulo(sequence) 分片（语义等价）。
+> 文档状态：**Spec v2.1 · HARD-GATE 通过 · v1 执行完成**（已被 v2 双通道异步批量替代）。Disruptor 4.0.0 移除 WorkerPool，本版改为 N EventHandler + modulo(sequence) 分片（语义等价）。
 
 ---
 

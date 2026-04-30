@@ -53,6 +53,30 @@ public class FxRateEvent {
     private String traceId;
 
     /**
+     * 深拷贝当前事件为全新实例
+     * <p>
+     * 使用场景：Disruptor 在 RingBuffer 中复用同一 event 槽位，EventHandler 若要把 event 放进
+     * 异步缓冲（Map / Queue），必须先拷贝，否则异步 Flusher 拿到的都是最后一次发布的字段值。
+     * <p>
+     * 注意：所有业务字段 + receiveNanos + traceId 都要复制，漏一个字段都会导致后续追踪/落库错乱。
+     */
+    public FxRateEvent copy() {
+        FxRateEvent c = new FxRateEvent();
+        c.ccyPair = this.ccyPair;
+        c.channelCd = this.channelCd;
+        c.buyPrice = this.buyPrice;
+        c.sellPrice = this.sellPrice;
+        c.blPrice = this.blPrice;
+        c.deliTyp = this.deliTyp;
+        c.dtChannelPublish = this.dtChannelPublish;
+        c.tmChannelPublish = this.tmChannelPublish;
+        c.utcTimes = this.utcTimes;
+        c.receiveNanos = this.receiveNanos;
+        c.traceId = this.traceId;
+        return c;
+    }
+
+    /**
      * 复用前清空，避免 RingBuffer 循环到旧数据污染下一次发布
      */
     public void clear() {

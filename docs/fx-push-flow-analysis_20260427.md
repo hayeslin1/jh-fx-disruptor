@@ -1,5 +1,13 @@
 # fx-disruptor · /fx/push 全链路深度分析
 
+> ⚠️ **本文描述的是 v1 同步单条落库路径**。当前架构已于 2026-04-30 升级为**双通道异步批量落库**，
+> 消费侧 `FxRatePersistenceEventHandler` 不再同步调 `persist()`，改为入 `latestBuffer / historyBuffer`
+> 由 `FxRateLatestFlusher / FxRateHistoryFlusher` 定时批量落库。
+> 改造详情见 [`fx-async-batch-persist_20260430.md`](fx-async-batch-persist_20260430.md)。
+> 本文保留作为 v1 路径的逐行参考（上游 / Producer / 重试 / DLQ 逻辑依然一致）。
+
+---
+
 > 版本：2026-04-27 · v1
 > 范围：自 HTTP 入口 `POST /fx/push` 起，至 MyBatis Mapper XML SQL 止（不下探至 MySQL InnoDB 层）
 > 阅读目标：新人 / 自学者能沿着 `path:line` 锚点在 IDE 内点跳跳读全流程
@@ -33,7 +41,7 @@
 ### 1.3 架构分层
 
 ```mermaid
-flowchart TB
+ flowchart TB
     subgraph HTTP["HTTP 层（接入线程：Tomcat Worker）"]
         Ctrl["FxRateReceiveController#push<br/>controller/FxRateReceiveController.java:35"]
         Svc["FxRateService#receive<br/>service/FxRateService.java:29"]

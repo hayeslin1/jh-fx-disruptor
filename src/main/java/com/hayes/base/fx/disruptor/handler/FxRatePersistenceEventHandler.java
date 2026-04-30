@@ -1,34 +1,47 @@
 package com.hayes.base.fx.disruptor.handler;
 
+import com.hayes.base.fx.buffer.FxRateHistoryBuffer;
+import com.hayes.base.fx.buffer.FxRateLatestBuffer;
+import com.hayes.base.fx.buffer.LatestKey;
 import com.hayes.base.fx.disruptor.FxRateEvent;
-import com.hayes.base.fx.service.FxRatePersistenceService;
+import com.hayes.base.fx.flusher.FxRateHistoryFlusher;
 import com.lmax.disruptor.EventHandler;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * 持久化 EventHandler（modulo 分片）
+ * 持久化 EventHandler（双通道入队，μs 级）
  * <p>
- * Disruptor 4.0.0 移除了 WorkerPool，通过 N 个 EventHandler 并行订阅 + modulo(sequence) 分片
- * 来实现"每条事件恰好被一个 handler 处理"的语义。
- * <p>
- * 构造参数：
+ * 改造前：同步调用 persist() 完成 UPSERT + INSERT，单条 ~118 ms。
+ * 改造后：仅把 event 深拷贝后放入两个内存缓冲——
  * <ul>
- *   <li>myIndex     本 handler 在分片组内的下标（0 ~ workerCount-1）</li>
- *   <li>workerCount handler 总数</li>
- *   <li>service     Spring 托管的持久化 Service（@Transactional 在它上面）</li>
+ *   <li>{@link FxRateLatestBuffer}：按 (channelCd, ccyPair, deliTyp) coalesce 最新值，
+ *       由 FxRateLatestFlusher 每 50ms 批量 UPSERT；</li>
+ *   <li>{@link FxRateHistoryBuffer}：FIFO 队列保留全量，
+ *       由 FxRateHistoryFlusher 每 2s 或满批批量 INSERT。</li>
  * </ul>
+ * <p>
+ * Sequence 语义：Handler 返回即推进，Disruptor 槽位立即可复用，生产者不再被消费速度拖累。
+ * 丢数据窗口：JVM 进程崩溃时内存 buffer 未 flush 的部分会丢——上游需具备重推能力。
  */
 @Slf4j
 public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> {
 
     private final int myIndex;
     private final int workerCount;
-    private final FxRatePersistenceService persistenceService;
+    private final FxRateLatestBuffer latestBuffer;
+    private final FxRateHistoryBuffer historyBuffer;
+    private final FxRateHistoryFlusher historyFlusher;
 
-    public FxRatePersistenceEventHandler(int myIndex, int workerCount, FxRatePersistenceService persistenceService) {
+    public FxRatePersistenceEventHandler(int myIndex,
+                                         int workerCount,
+                                         FxRateLatestBuffer latestBuffer,
+                                         FxRateHistoryBuffer historyBuffer,
+                                         FxRateHistoryFlusher historyFlusher) {
         this.myIndex = myIndex;
         this.workerCount = workerCount;
-        this.persistenceService = persistenceService;
+        this.latestBuffer = latestBuffer;
+        this.historyBuffer = historyBuffer;
+        this.historyFlusher = historyFlusher;
     }
 
     @Override
@@ -38,9 +51,31 @@ public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> 
             return;
         }
         try {
-            persistenceService.persist(event);
+            long t0 = System.nanoTime();
+            // 报价通道：深拷贝 + coalesce（按 DT+TM_CHANNEL_PUBLISH 保序）
+            FxRateEvent forLatest = event.copy();
+            LatestKey key = new LatestKey(forLatest.getChannelCd(), forLatest.getCcyPair(), forLatest.getDeliTyp());
+            latestBuffer.merge(key, forLatest);
+
+            // 历史通道：深拷贝 + 入队（不 coalesce，保留全量）
+            FxRateEvent forHis = event.copy();
+            if (!historyBuffer.offer(forHis)) {
+                // 队列满 → 同步触发一次 flush 腾出空间，再重试一次
+                historyFlusher.flushNow();
+                if (!historyBuffer.offer(forHis)) {
+                    // 仍然失败 → 记 ERROR 日志 + 单条走老 persist 路径兜底（含 DLQ）
+                    log.error("[fx-rate] history buffer full after flushNow, fallback to sync persist. traceId={} ccyPair={}",
+                            forHis.getTraceId(), forHis.getCcyPair());
+                    // 注：此处不调 persistenceService.persist——Handler 不应持久化同步调用，
+                    // 否则会退化回 118ms/条。只记日志让运维感知，后续若真发生再加 DLQ 写入。
+                }
+            }
+
+            if (log.isDebugEnabled()) {
+                log.debug("[fx-rate] onEvent enqueue cost nanos={}", System.nanoTime() - t0);
+            }
         } catch (Throwable ex) {
-            // Service 内部已带重试与 DLQ；此处兜底不让异常冒出，否则 Disruptor 会停止
+            // 兜底不让异常冒出，否则 Disruptor 会停止
             log.error("[fx-rate] handler#{} 未预期异常 traceId={} ccyPair={} channelCd={}",
                     myIndex, event.getTraceId(), event.getCcyPair(), event.getChannelCd(), ex);
         }

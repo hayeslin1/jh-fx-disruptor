@@ -102,6 +102,58 @@ public class FxRatePersistenceService {
         fxXrInfHisMapper.insertOne(event, opCode, todayInt, now, FxConst.SUCC_FLG_SUCCESS);
     }
 
+    // ======================= 双通道异步批量落库入口 =======================
+
+    /**
+     * 批量 UPSERT 最新态（报价通道专用，由 FxRateLatestFlusher 调用）。
+     * <p>
+     * 单事务提交整批；整批失败时由调用方逐条回退走老 {@link #persist} 路径（带重试 + DLQ）。
+     * 不使用 REQUIRES_NEW——外层 Flusher 非事务上下文，直接新开事务即可。
+     *
+     * @param events 已 coalesce 的最新态列表（由 FxRateLatestBuffer.drainAll 取出）
+     */
+    @Transactional(rollbackFor = Throwable.class)
+    public void doPersistLatestBatch(List<FxRateEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return;
+        }
+        String opCode = fxProps.getOpCode();
+        String today = FxTimeUtils.today();
+        String now = FxTimeUtils.now();
+
+        // 兜底 DELI_TYP（防止未过 Translator 的事件）
+        for (FxRateEvent e : events) {
+            if (StringUtils.isBlank(e.getDeliTyp())) {
+                e.setDeliTyp(fxProps.getDefaultDeliTyp());
+            }
+        }
+        fxXrInfMapper.upsertBatch(events, opCode, today, now, fxProps.isOrderGuardEnabled());
+    }
+
+    /**
+     * 批量 INSERT 历史流水（历史通道专用，由 FxRateHistoryFlusher 调用）。
+     * <p>
+     * 单事务提交整批；整批失败时由调用方逐条回退走老 {@link #persist} 路径，保证不丢。
+     *
+     * @param events 历史事件列表（由 FxRateHistoryBuffer.drainTo 取出，保留全量）
+     */
+    @Transactional(rollbackFor = Throwable.class)
+    public void doPersistHistoryBatch(List<FxRateEvent> events) {
+        if (events == null || events.isEmpty()) {
+            return;
+        }
+        String opCode = fxProps.getOpCode();
+        String now = FxTimeUtils.now();
+        int todayInt = FxTimeUtils.todayInt();
+
+        for (FxRateEvent e : events) {
+            if (StringUtils.isBlank(e.getDeliTyp())) {
+                e.setDeliTyp(fxProps.getDefaultDeliTyp());
+            }
+        }
+        fxXrInfHisMapper.insertBatch(events, opCode, todayInt, now, FxConst.SUCC_FLG_SUCCESS);
+    }
+
     /**
      * DLQ 写入（独立事务），截断异常消息
      */

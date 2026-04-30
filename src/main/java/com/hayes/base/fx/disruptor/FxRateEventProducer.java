@@ -3,6 +3,7 @@ package com.hayes.base.fx.disruptor;
 import com.hayes.base.fx.dto.FxRatePushDTO;
 import com.lmax.disruptor.RingBuffer;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
@@ -13,6 +14,7 @@ import org.springframework.stereotype.Component;
  * Ring 满时由当前配置的 WaitStrategy 决定阻塞或告警——当前默认 BlockingWaitStrategy 会阻塞生产线程，
  * 这是对后端 MySQL 堆积压力的天然背压。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class FxRateEventProducer {
@@ -26,6 +28,8 @@ public class FxRateEventProducer {
      * @param traceId 链路追踪 ID，调用方生成
      */
     public void publish(FxRatePushDTO dto, String traceId) {
+        long t0 = System.nanoTime();
         ringBuffer.publishEvent(FxRateEventTranslator.INSTANCE, dto, traceId);
+        log.info("FxRateEventProducer 发送一条消息耗时：{}",System.nanoTime() - t0);
     }
 }

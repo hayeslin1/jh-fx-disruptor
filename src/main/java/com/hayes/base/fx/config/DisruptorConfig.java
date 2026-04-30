@@ -1,9 +1,11 @@
 package com.hayes.base.fx.config;
 
+import com.hayes.base.fx.buffer.FxRateHistoryBuffer;
+import com.hayes.base.fx.buffer.FxRateLatestBuffer;
 import com.hayes.base.fx.disruptor.FxRateEvent;
 import com.hayes.base.fx.disruptor.FxRateEventFactory;
 import com.hayes.base.fx.disruptor.handler.FxRatePersistenceEventHandler;
-import com.hayes.base.fx.service.FxRatePersistenceService;
+import com.hayes.base.fx.flusher.FxRateHistoryFlusher;
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.RingBuffer;
@@ -13,13 +15,14 @@ import com.lmax.disruptor.YieldingWaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.DisposableBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -28,20 +31,31 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 关键点：
  * 1. Disruptor 4.0.0 需要 ThreadFactory（Executor 构造函数已移除）；
  * 2. 通过 handleEventsWith(handler0..handlerN-1) 并行订阅，每个 handler 内部 modulo 分片；
- * 3. 实现 DisposableBean#destroy 以在 Spring 容器关闭时先停 Disruptor，避免丢事件。
+ * 3. 实现 SmartLifecycle，phase = Integer.MAX_VALUE，确保关闭顺序为
+ *    "先停 Disruptor → 再停 Flushers"：Spring 的 SmartLifecycle stop 按 phase 降序触发，
+ *    Flushers 使用 MAX_VALUE-100，自然晚于本组件停止，从而能接住 in-flight 事件进入 buffer 后
+ *    的最后一次 drain。
  */
 @Slf4j
 @Configuration
 @EnableConfigurationProperties({DisruptorProperties.class, FxProperties.class})
-public class DisruptorConfig implements DisposableBean {
+public class DisruptorConfig implements SmartLifecycle {
 
     private final DisruptorProperties props;
-    private final FxRatePersistenceService persistenceService;
+    private final FxRateLatestBuffer latestBuffer;
+    private final FxRateHistoryBuffer historyBuffer;
+    private final FxRateHistoryFlusher historyFlusher;
     private Disruptor<FxRateEvent> disruptor;
+    private final AtomicBoolean running = new AtomicBoolean(false);
 
-    public DisruptorConfig(DisruptorProperties props, FxRatePersistenceService persistenceService) {
+    public DisruptorConfig(DisruptorProperties props,
+                           FxRateLatestBuffer latestBuffer,
+                           FxRateHistoryBuffer historyBuffer,
+                           FxRateHistoryFlusher historyFlusher) {
         this.props = props;
-        this.persistenceService = persistenceService;
+        this.latestBuffer = latestBuffer;
+        this.historyBuffer = historyBuffer;
+        this.historyFlusher = historyFlusher;
     }
 
     /**
@@ -72,7 +86,8 @@ public class DisruptorConfig implements DisposableBean {
         // 但 handler 内部按 sequence % N == myIndex 过滤——语义等价于 WorkerPool
         FxRatePersistenceEventHandler[] handlers = new FxRatePersistenceEventHandler[workerCount];
         for (int i = 0; i < workerCount; i++) {
-            handlers[i] = new FxRatePersistenceEventHandler(i, workerCount, persistenceService);
+            handlers[i] = new FxRatePersistenceEventHandler(
+                    i, workerCount, latestBuffer, historyBuffer, historyFlusher);
         }
         disruptor.handleEventsWith(handlers);
 
@@ -83,10 +98,26 @@ public class DisruptorConfig implements DisposableBean {
     }
 
     /**
-     * 容器关闭时优雅停机：等待 in-flight 事件消费完
+     * SmartLifecycle.start：Disruptor 实际启动发生在 {@link #ringBuffer()} @Bean 里，
+     * 这里仅标记状态，避免重复 start。
      */
     @Override
-    public void destroy() {
+    public void start() {
+        running.set(true);
+    }
+
+    /**
+     * 容器关闭时优雅停机：等待 in-flight 事件消费完，使 buffer 接到所有剩余事件。
+     * <p>
+     * phase = Integer.MAX_VALUE，stop 顺序中本组件最先被触发——先停 Disruptor，
+     * 让 in-flight 事件最后一次走完 handler 进入 latestBuffer / historyBuffer；
+     * 然后 phase 较小的 Flushers（MAX-100）再 stop，把 buffer drain 干净。
+     */
+    @Override
+    public void stop() {
+        if (!running.compareAndSet(true, false)) {
+            return;
+        }
         if (disruptor == null) {
             return;
         }
@@ -98,6 +129,24 @@ public class DisruptorConfig implements DisposableBean {
                     props.getShutdownTimeoutSeconds(), ex);
             disruptor.halt();
         }
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running.get();
+    }
+
+    /**
+     * phase 最大：SmartLifecycle stop 按 phase 降序触发——本组件先停，Flushers 后停。
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE;
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
     }
 
     /**

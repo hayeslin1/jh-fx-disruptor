@@ -1,8 +1,13 @@
 # hayes-fx-disruptor
 
-基于 **LMAX Disruptor 4.0.0** 的实时外汇汇率接收 / 落库微服务。承接上游（银行 / 报价渠道）高频推送，单条事件**实时**进库，目标 ≈ **1000 QPS**（100 货币对 × 10 渠道）。
+基于 **LMAX Disruptor 4.0.0** 的实时外汇汇率接收 / 落库微服务。承接上游（银行 / 报价渠道）高频推送，目标 ≈ **1000 QPS**（100 货币对 × 10 渠道）。
 
-> HTTP 接入 → Disruptor 内存 RingBuffer → 8 线程并行消费 → 主表 UPSERT + 历史表 INSERT（单事务） → 失败重试 + DLQ 兜底。
+> HTTP 接入 → Disruptor 内存 RingBuffer → N 线程 **μs 级双通道入队** →
+> `fx_xr_inf` 每 50 ms 批量 UPSERT ＋ `fx_xr_his` 每 2 s 批量 INSERT →
+> 整批失败回退单条 `persist` 重试 + DLQ 兜底。
+
+> **v2 改造（2026-04-30）**：消费侧由"同步单条落库 118 ms"改为"纯内存入队 μs 级 + 定时批量 flush"，详见
+> [`docs/fx-async-batch-persist_20260430.md`](docs/fx-async-batch-persist_20260430.md)。
 
 ---
 
@@ -24,12 +29,15 @@
 
 ## 特性
 
-- **实时单条落库**：生产 → RingBuffer → 消费 → SQL，端到端延迟毫秒级，主表随时可查最新态。
-- **UPSERT + 时间守卫**：`INSERT ... ON DUPLICATE KEY UPDATE` 基于 `(CHANNEL_CD, CCY_PAIR, DELI_TYP)` 唯一键；可选"渠道发布时间"比较，防止并发乱序覆盖新值。
-- **指数退避重试 + DLQ**：`@Transactional(REQUIRES_NEW)` + 3 次 `[10, 50, 200]ms` 退避；全败写死信表 + ERROR 日志。
-- **优雅停机**：容器关闭前 `disruptor.shutdown(timeout)` 等待 in-flight 事件消费完毕。
-- **生产侧背压**：`BlockingWaitStrategy` 让 RingBuffer 满时生产者线程阻塞，自动把流控压回 HTTP / MQ。
-- **分片并行消费**：8 个 `EventHandler` 共享 RingBuffer，基于 `sequence % workerCount` modulo 过滤，序列号相同的事件走同一个 worker（保证同一货币对的时序在单线程内有序）。
+- **双通道异步批量落库**：
+  - `fx_xr_inf` 报价通道：`ConcurrentHashMap` 按 `(CHANNEL_CD, CCY_PAIR, DELI_TYP)` 合并最新值，每 **50 ms** 批量 UPSERT，报价延迟上限 ≤ 50 ms。
+  - `fx_xr_his` 历史通道：`LinkedBlockingQueue(100k)` 保留全量，每 **2 s** 或队列满时批量 INSERT，延迟上限 ≤ 2 s。
+- **消费侧 μs 级入队**：`onEvent` 仅做内存 `merge + offer`，Disruptor sequence 立即推进，生产者不再被消费速度拖累（v1 118 ms → v2 ≈ 5 μs）。
+- **UPSERT + 时间守卫**：`INSERT ... ON DUPLICATE KEY UPDATE` 基于 `(CHANNEL_CD, CCY_PAIR, DELI_TYP)` 唯一键；`orderGuard` 按 `DT+TM_CHANNEL_PUBLISH` 比较，防止并发乱序覆盖新值（批量模式下 VALUES(col) 行级生效）。
+- **指数退避重试 + DLQ**：批量失败回退原 `persist` 路径，3 次 `[10, 50, 200] ms` 退避；全败写 DLQ 独立事务 + ERROR 日志。
+- **优雅停机**（SmartLifecycle，按 `phase` 降序停）：`DisruptorConfig`（`MAX_VALUE`）先停等 in-flight 归位 → Flushers（`MAX_VALUE - 100`）后停，最后一次 drain 到底，JVM 正常退出不丢。
+- **生产侧背压**：`BlockingWaitStrategy` 让 RingBuffer 满时生产者线程阻塞；`historyBuffer.offer` 满时 Handler 同步 `flushNow()` 再重试，保住 Disruptor 不阻塞。
+- **分片并行消费**：N 个 `EventHandler` 共享 RingBuffer，基于 `sequence % workerCount` modulo 过滤，互不重复。
 
 ## 技术栈
 
@@ -52,29 +60,35 @@
     │  HTTP POST /fx/push
     ▼
 Controller → Service → Producer ──publishEvent──▶ ┌──────────────────┐
-                                                   │  RingBuffer 4096  │ ← 多生产者 MULTI
+                                                   │  RingBuffer 4096 │ ← 多生产者 MULTI
                                                    └────────┬─────────┘
                                                             │ (BlockingWaitStrategy)
                                           ┌─────────┬───────┼───────┬─────────┐
-                                    fx-disruptor-1      ...       fx-disruptor-8
+                                    fx-disruptor-1      ...       fx-disruptor-N
                                           │                                   │
                                           ▼                                   ▼
-                           FxRatePersistenceEventHandler (modulo 分片)
-                                          │
-                                          ▼
-                           FxRatePersistenceService
-                              │
-                              ├─ doPersist() @Transactional(REQUIRES_NEW)
-                              │     ├─ UPSERT fx_xr_inf
-                              │     └─ INSERT fx_xr_inf_his
-                              │
-                              └─ [重试 3 次仍失败]
-                                 writeDlq() @Transactional(REQUIRES_NEW)
-                                     └─ INSERT fx_xr_inf_dlq
+                       FxRatePersistenceEventHandler（μs 级，modulo 分片）
+                          │                                      │
+                   event.copy() → latestBuffer.merge    event.copy() → historyBuffer.offer
+                          │                                      │
+                ┌─────────▼───────────┐              ┌───────────▼────────────┐
+                │ FxRateLatestFlusher  │              │ FxRateHistoryFlusher    │
+                │ 每 50 ms drainAll    │              │ 每 2 s drainTo(1000)    │
+                │ doPersistLatestBatch │              │ doPersistHistoryBatch   │
+                │ UPSERT fx_xr_inf     │              │ INSERT fx_xr_inf_his    │
+                └─────────┬───────────┘              └───────────┬────────────┘
+                          │ 整批失败                              │ 整批失败
+                          └──────────┐         ┌─────────────────┘
+                                     ▼         ▼
+                           FxRatePersistenceService.persist()
+                              ├─ 3 次 [10,50,200]ms 退避重试
+                              └─ 全败 → writeDlq() @REQUIRES_NEW
+                                       └─ INSERT fx_xr_inf_dlq
 ```
 
-详细逐行解析见 [`docs/fx-push-flow-analysis_20260427.md`](docs/fx-push-flow-analysis_20260427.md)。
-设计 Spec 见 [`docs/fx-rate-disruptor-plan.md`](docs/fx-rate-disruptor-plan.md)。
+- **v2 改造文档**：[`docs/fx-async-batch-persist_20260430.md`](docs/fx-async-batch-persist_20260430.md)（本次改动的完整说明）
+- **v1 全链路解析**：[`docs/fx-push-flow-analysis_20260427.md`](docs/fx-push-flow-analysis_20260427.md)（改造前同步路径逐行讲解，保留作参考）
+- **v1 设计 Spec**：[`docs/fx-rate-disruptor-plan.md`](docs/fx-rate-disruptor-plan.md)
 
 ## 快速开始
 
@@ -227,15 +241,24 @@ app:
     ring-buffer-size: 4096        # 必须 2 的幂
     worker-count: 8               # 并行 EventHandler 数
     wait-strategy: blocking       # blocking | yielding | busy-spin | sleeping
-    shutdown-timeout-seconds: 5   # 优雅停机等待
+    shutdown-timeout-seconds: 5   # Disruptor 优雅停机等待
   fx:
     op-code: SYS_FX_RATE          # 主表 OP_CTE / OP_UTE 固定账号
     default-deli-typ: "00"        # DELI_TYP 缺省兜底
     order-guard-enabled: true     # 启用时间守卫
-    retry-times: 3                # 失败重试次数（不含首次）
+    retry-times: 3                # 批量失败回退单条重试次数（不含首次）
     retry-backoff-ms: 10,50,200   # 指数退避序列
     dlq-enabled: true             # 全败写 DLQ 表
+    flush:
+      latest-interval-ms: 50              # 报价通道 flush 间隔
+      latest-batch-max-size: 500          # 单批 UPSERT 上限
+      history-interval-ms: 2000           # 历史通道 flush 间隔
+      history-batch-max-size: 1000        # 单批 INSERT 上限
+      history-queue-capacity: 100000      # 历史队列容量
+      history-queue-warn-threshold: 50000 # 高水位告警阈值
 ```
+
+> JDBC URL 建议启用 `rewriteBatchedStatements=true`，让多 VALUES 批量生效。
 
 ## 压测
 
@@ -273,19 +296,26 @@ src/main/java/com/hayes/base/fx/
 │   └── FxTimeUtils.java                      today / now / todayInt
 ├── config/
 │   ├── DisruptorProperties.java              app.disruptor.*
-│   ├── FxProperties.java                     app.fx.*
-│   └── DisruptorConfig.java                  Disruptor Bean + 8 handler + 优雅关闭
+│   ├── FxProperties.java                     app.fx.*（含 Flush 内嵌段）
+│   └── DisruptorConfig.java                  Disruptor Bean + N handler + SmartLifecycle(phase=MAX)
+├── buffer/                                     v2 新增，双通道内存缓冲
+│   ├── LatestKey.java                        (channelCd, ccyPair, deliTyp) 复合 key
+│   ├── FxRateLatestBuffer.java               ConcurrentHashMap + 时间戳保序 merge
+│   └── FxRateHistoryBuffer.java              LinkedBlockingQueue(100k) + 高水位告警
+├── flusher/                                    v2 新增，批量 flusher
+│   ├── FxRateLatestFlusher.java              50 ms drainAll → UPSERT 批量
+│   └── FxRateHistoryFlusher.java             2 s drainTo → INSERT 批量，flushNow 供背压
 ├── disruptor/
-│   ├── FxRateEvent.java                      事件 POJO
+│   ├── FxRateEvent.java                      事件 POJO（含 copy() 深拷贝）
 │   ├── FxRateEventFactory.java               RingBuffer 预填充
 │   ├── FxRateEventTranslator.java            DTO → Event
 │   ├── FxRateEventProducer.java              publishEvent
-│   └── handler/FxRatePersistenceEventHandler.java   modulo 分片消费
+│   └── handler/FxRatePersistenceEventHandler.java   μs 级双通道入队
 ├── controller/
 │   └── FxRateReceiveController.java          POST /fx/push
 ├── service/
 │   ├── FxRateService.java                    traceId + 投递
-│   └── FxRatePersistenceService.java         persist + 重试 + DLQ
+│   └── FxRatePersistenceService.java         persist + doPersistLatestBatch + doPersistHistoryBatch + DLQ
 ├── entity/{FxXrInf, FxXrInfHis, FxXrInfDlq}.java
 ├── mapper/{FxXrInfMapper, FxXrInfHisMapper, FxXrInfDlqMapper}.java
 └── dto/FxRatePushDTO.java
@@ -298,8 +328,9 @@ src/main/resources/
     └── FxXrInfHisMapper.xml                  INSERT 单行
 
 docs/
-├── fx-rate-disruptor-plan.md                 设计 Spec v2.1
-├── fx-push-flow-analysis_20260427.md         全链路逐行解析
+├── fx-async-batch-persist_20260430.md        v2 双通道异步批量落库改造（当前架构）
+├── fx-rate-disruptor-plan.md                 v1 设计 Spec
+├── fx-push-flow-analysis_20260427.md         v1 全链路逐行解析
 └── sql/ddl-fx_xr_inf_dlq.sql                 DLQ 建表脚本
 ```
 
@@ -309,16 +340,24 @@ docs/
 LMAX Disruptor 4.0.0 移除了 `WorkerPool`。本项目用 **N 个 EventHandler + modulo 分片** 实现等价的工作队列语义：每个 handler 只处理 `sequence % N == myIndex` 的事件，互不重复。
 
 **Q2：为什么 worker-count 默认是 8？**
-单条路径两条 SQL（UPSERT + INSERT）≈ 4ms，1000 QPS 需要 4 并发。8 提供 2× 余量，生产前请用压测校准。
+v2 下消费侧是内存 op（μs 级），单 handler 理论上够用；保留分片是为将来加 CPU 密集逻辑时不用再改架构。生产前用压测校准。
 
 **Q3：RingBuffer 满会怎样？**
-`BlockingWaitStrategy` 让生产者线程阻塞在 `ringBuffer.next()`，这个阻塞会向上传导到 Tomcat 工作线程（即 HTTP 响应变慢），形成天然背压。
+`BlockingWaitStrategy` 让生产者线程阻塞在 `ringBuffer.next()`，向上传导到 Tomcat 工作线程（HTTP 响应变慢），形成天然背压。v2 下消费侧 μs 级，RingBuffer 几乎不会堆积。
 
 **Q4：DLQ 什么时候触发？**
-持久化事务重试 `retry-times` 次后仍抛异常，使用**独立事务**写 `fx_xr_inf_dlq`；DLQ 写入本身失败只记 ERROR 日志，不再级联重试。
+批量通道整批失败 → 回退单条 `persist` 重试 `retry-times` 次仍失败 → 独立事务写 `fx_xr_inf_dlq`；DLQ 写入本身失败只记 ERROR 日志，不再级联重试。
 
 **Q5：如何在生产环境观测？**
-建议后续接入 Prometheus，采集三项指标：`RingBuffer.remainingCapacity()`、`persist` 耗时分布、DLQ 计数。目前已通过 SLF4J 打印关键日志。
+建议接入 Prometheus 采集：`RingBuffer.remainingCapacity()`、`latestBuffer.size`、`historyBuffer.size`、每轮 flush batch size / 耗时、降级次数、DLQ 计数。目前已通过 SLF4J 打印关键日志。
+
+**Q6：v2 会丢数据吗？**
+JVM **正常停机**（Spring `SmartLifecycle` 正常触发）不丢：Disruptor 先停让 in-flight 归位，Flushers 后停把 buffer 排干。
+JVM **崩溃**（OOM、SIGKILL）时，内存 buffer 未 flush 的部分会丢——这是"纯内存队列"方案的已知窗口，**依赖上游具备重推能力**。
+接入 HTTP 同步推送业务方时需升级到 Outbox 表方案。
+
+**Q7：为什么上游停推时，history 不足 1000 条也没到 2 s 就停了？**
+`historyBatchMaxSize=1000` 是**单次 drain 的上限**，不是触发条件。`scheduleAtFixedRate` 每 2 s 无条件 tick 一次——上游停推后，最迟在下一个 tick 把队列里剩余的 N 条全部 drain 批量写入。触发条件只有三种：定时 tick / 队列满 `flushNow()` / 停机 `drainUntilEmpty`。
 
 ## License
 

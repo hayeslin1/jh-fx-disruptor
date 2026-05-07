@@ -53,7 +53,7 @@ public class FxProperties {
     public static class Flush {
 
         /** 报价通道 flush 间隔（ms），值越小报价越实时但 DB 压力越大 */
-        private int latestIntervalMs = 50;
+        private int latestIntervalMs = 100;
 
         /** 报价通道单次批量上限，防止某次 drain 过大导致长事务 */
         private int latestBatchMaxSize = 500;

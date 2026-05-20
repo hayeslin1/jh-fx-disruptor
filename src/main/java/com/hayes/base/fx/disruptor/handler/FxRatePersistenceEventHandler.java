@@ -52,7 +52,7 @@ public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> 
         }
         try {
             long t0 = System.nanoTime();
-            // 报价通道：深拷贝 + coalesce（按 DT+TM_CHANNEL_PUBLISH 保序）
+            // 报价通道：深拷贝 + coalesce（按 UTC_TIMES 保序）
             FxRateEvent forLatest = event.copy();
             LatestKey key = new LatestKey(forLatest.getChannelCd(), forLatest.getCcyPair(), forLatest.getDeliTyp());
             latestBuffer.merge(key, forLatest);

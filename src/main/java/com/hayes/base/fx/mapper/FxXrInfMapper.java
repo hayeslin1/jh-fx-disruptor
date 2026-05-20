@@ -18,7 +18,8 @@ public interface FxXrInfMapper extends BaseMapper<FxXrInf> {
      * UPSERT 最新态。
      * <p>
      * {@code orderGuard=true} 时 SQL 会用 {@code IF} 包裹每个被更新字段，
-     * 仅当新推送的 {@code DT+TM_CHANNEL_PUBLISH} 不早于现存行时才覆盖（防并发乱序）。
+     * 仅当新推送的 {@code UTC_TIMES} 不早于现存行时才覆盖（防并发乱序）。
+     * 与内存层 {@code FxRateLatestBuffer} 的保序字段保持一致。
      *
      * @param event      事件
      * @param opCode     OP_CTE/OP_UTE 账号常量

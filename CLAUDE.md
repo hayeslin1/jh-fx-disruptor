@@ -15,7 +15,7 @@ java -jar target/hayes-fx-disruptor-dev.jar
 # 冒烟测试
 curl -X POST http://localhost:8080/fx/push \
   -H 'Content-Type: application/json' \
-  -d '{"ccyPair":"USDCNY","channelCd":"BOC","buyPrice":7.1234,"sellPrice":7.1256,"blPrice":7.1245,"deliTyp":"00","dtChannelPublish":"20260427","tmChannelPublish":"120000"}'
+  -d '{"ccyPair":"USDCNY","channelCd":"BOC","buyPrice":7.1234,"sellPrice":7.1256,"blPrice":7.1245,"deliTyp":"00","dtChannelPublish":"20260427","tmChannelPublish":"120000","utcTimes":"2026-04-27T12:00:00.000Z"}'
 
 # 压测（需先启动 Application）
 mvn -Denv=dev test -Dtest=FxRatePushTest#pushTest \

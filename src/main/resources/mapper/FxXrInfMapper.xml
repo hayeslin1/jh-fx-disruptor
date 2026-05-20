@@ -8,10 +8,10 @@
         - 首次到达的 (CHANNEL_CD, CCY_PAIR, DELI_TYP) 组合 → INSERT
         - 已存在 → UPDATE 目标字段
       orderGuard=true 时，在每个 UPDATE 目标字段上包一层 IF：
-          IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-             >= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-             VALUES(X), X)
-      → 只有新推送的渠道发布时刻不早于当前行，才会覆盖；防止并发 Worker 导致旧覆盖新。
+          IF(VALUES(UTC_TIMES) >= UTC_TIMES, VALUES(X), X)
+      → 只有新推送的 UTC_TIMES 不早于当前行，才会覆盖；防止并发 Worker 导致旧覆盖新。
+      与内存层 FxRateLatestBuffer.merge() 的保序字段保持一致（统一用 UTC_TIMES，
+      跨日切 / 跨时区下字典序与时间序一致；DT+TM_CHANNEL_PUBLISH 是渠道本地时间，仅作业务字段保留）。
     -->
     <insert id="upsert">
         INSERT INTO fx_xr_inf (
@@ -26,33 +26,16 @@
         ON DUPLICATE KEY UPDATE
         <choose>
             <when test="orderGuard">
-                BUY_PRICE          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(BUY_PRICE), BUY_PRICE),
-                SELL_PRICE         = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(SELL_PRICE), SELL_PRICE),
-                BL_PRICE           = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(BL_PRICE), BL_PRICE),
-                OP_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(OP_UTE), OP_UTE),
-                DT_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(DT_UTE), DT_UTE),
-                TM_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(TM_UTE), TM_UTE),
-                UTC_TIMES          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(UTC_TIMES), UTC_TIMES),
-                DT_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(DT_CHANNEL_PUBLISH), DT_CHANNEL_PUBLISH),
-                TM_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(TM_CHANNEL_PUBLISH), TM_CHANNEL_PUBLISH)
+                BUY_PRICE          = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(BUY_PRICE), BUY_PRICE),
+                SELL_PRICE         = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(SELL_PRICE), SELL_PRICE),
+                BL_PRICE           = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(BL_PRICE), BL_PRICE),
+                OP_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(OP_UTE), OP_UTE),
+                DT_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(DT_UTE), DT_UTE),
+                TM_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(TM_UTE), TM_UTE),
+                DT_CHANNEL_PUBLISH = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(DT_CHANNEL_PUBLISH), DT_CHANNEL_PUBLISH),
+                TM_CHANNEL_PUBLISH = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(TM_CHANNEL_PUBLISH), TM_CHANNEL_PUBLISH),
+                <!-- UTC_TIMES 自身放最后赋值，避免被本行其它 IF 引用前先被改写 -->
+                UTC_TIMES          = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(UTC_TIMES), UTC_TIMES)
             </when>
             <otherwise>
                 BUY_PRICE          = VALUES(BUY_PRICE),
@@ -90,33 +73,16 @@
         ON DUPLICATE KEY UPDATE
         <choose>
             <when test="orderGuard">
-                BUY_PRICE          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(BUY_PRICE), BUY_PRICE),
-                SELL_PRICE         = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(SELL_PRICE), SELL_PRICE),
-                BL_PRICE           = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(BL_PRICE), BL_PRICE),
-                OP_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(OP_UTE), OP_UTE),
-                DT_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(DT_UTE), DT_UTE),
-                TM_UTE             = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(TM_UTE), TM_UTE),
-                UTC_TIMES          = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(UTC_TIMES), UTC_TIMES),
-                DT_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(DT_CHANNEL_PUBLISH), DT_CHANNEL_PUBLISH),
-                TM_CHANNEL_PUBLISH = IF(CONCAT(VALUES(DT_CHANNEL_PUBLISH), VALUES(TM_CHANNEL_PUBLISH))
-                                        &gt;= CONCAT(DT_CHANNEL_PUBLISH, TM_CHANNEL_PUBLISH),
-                                        VALUES(TM_CHANNEL_PUBLISH), TM_CHANNEL_PUBLISH)
+                BUY_PRICE          = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(BUY_PRICE), BUY_PRICE),
+                SELL_PRICE         = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(SELL_PRICE), SELL_PRICE),
+                BL_PRICE           = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(BL_PRICE), BL_PRICE),
+                OP_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(OP_UTE), OP_UTE),
+                DT_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(DT_UTE), DT_UTE),
+                TM_UTE             = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(TM_UTE), TM_UTE),
+                DT_CHANNEL_PUBLISH = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(DT_CHANNEL_PUBLISH), DT_CHANNEL_PUBLISH),
+                TM_CHANNEL_PUBLISH = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(TM_CHANNEL_PUBLISH), TM_CHANNEL_PUBLISH),
+                <!-- UTC_TIMES 自身放最后赋值，避免被本行其它 IF 引用前先被改写 -->
+                UTC_TIMES          = IF(VALUES(UTC_TIMES) &gt;= UTC_TIMES, VALUES(UTC_TIMES), UTC_TIMES)
             </when>
             <otherwise>
                 BUY_PRICE          = VALUES(BUY_PRICE),

@@ -9,7 +9,9 @@ import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Random;
@@ -55,6 +57,9 @@ public class FxRatePushTest {
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("HHmmss");
+    /** ISO-8601 UTC 时间戳格式，固定 3 位毫秒；与 DTO 端 @Pattern 校验对齐 */
+    private static final DateTimeFormatter UTC_FMT =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
 
     /**
      * 主测试入口：按指定 QPS 持续向 /fx/push 推送模拟数据，并打印实时进度与最终汇总。
@@ -189,8 +194,8 @@ public class FxRatePushTest {
         dto.setDeliTyp(deliTyp);
         dto.setDtChannelPublish(now.format(DATE_FMT));
         dto.setTmChannelPublish(now.format(TIME_FMT));
-        // utcTimes 最长 32 位，用毫秒时间戳串（13 位）保险
-        dto.setUtcTimes(String.valueOf(System.currentTimeMillis()));
+        // ISO-8601 UTC 24 字符串，毫秒精度（DTO 端 @Pattern 强制 .SSS 三位）
+        dto.setUtcTimes(UTC_FMT.format(Instant.now()));
         return dto;
     }
 }

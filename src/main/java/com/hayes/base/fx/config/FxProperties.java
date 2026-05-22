@@ -69,5 +69,13 @@ public class FxProperties {
 
         /** 历史队列高水位阈值，超过后打告警 */
         private int historyQueueWarnThreshold = 50_000;
+
+        /**
+         * 结构化指标日志（FxMetricsReporter）输出间隔（ms）。
+         * <p>
+         * 60000 = 每 60s 一行 [fx-metrics] JSON；<=0 时 Reporter Bean 整体不注册（由
+         * @ConditionalOnExpression 控制），避免 Spring @Scheduled fixedDelay=0 的未定义行为。
+         */
+        private int metricsLogIntervalMs = 60_000;
     }
 }

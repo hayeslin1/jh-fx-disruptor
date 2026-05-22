@@ -18,7 +18,10 @@ import java.util.concurrent.TimeUnit;
  * 指标门面：集中持有所有 fx.* Meter 实例。
  * <p>
  * 设计要点：
- * 1. 3 Gauge 通过方法引用零侵入接入 RingBuffer / 两个 Buffer，bean 由 Spring 强引用持有，无 weak ref 失效风险；
+ * 1. 2 个 Buffer 类 Gauge 在构造期注册；RingBuffer Gauge 通过
+ *    {@link #registerRingBufferGauge(RingBuffer)} 由 {@code DisruptorConfig} 在
+ *    {@code @Bean ringBuffer()} 方法体内显式注册——避免 FxMetrics 直接依赖 RingBuffer Bean，
+ *    打破 disruptorConfig → historyFlusher → fxMetrics → ringBuffer → disruptorConfig 的构造期循环依赖；
  *    `fx.ring_buffer.remaining_capacity` 附 `buffer_size` tag 便于运维直接判断危险度；
  * 2. 8 Counter / 3 Timer / 2 DistributionSummary 全部 final 字段持有，对外只暴露语义化方法 incXxx/recordXxx；
  *    Reporter 通过 package-private getter 直接取引用，避免按 name 反向查询的脆弱与拼写错误；
@@ -27,6 +30,9 @@ import java.util.concurrent.TimeUnit;
  */
 @Component
 public class FxMetrics {
+
+    /** 持有 registry 引用，供 {@link #registerRingBufferGauge} 延迟注册 Gauge 使用 */
+    private final MeterRegistry registry;
 
     // ===== Counter =====
     private final Counter historyReject;
@@ -48,16 +54,14 @@ public class FxMetrics {
     private final DistributionSummary historyBatchSize;
 
     public FxMetrics(MeterRegistry registry,
-                     RingBuffer<FxRateEvent> ringBuffer,
                      FxRateLatestBuffer latestBuffer,
                      FxRateHistoryBuffer historyBuffer) {
-        // ===== Gauge：方法引用接入，不持字段（注册到 registry 即可由 Reporter 按 name 取）=====
-        Gauge.builder("fx.ring_buffer.remaining_capacity", ringBuffer,
-                        rb -> (double) rb.remainingCapacity())
-                .description("RingBuffer 剩余可写槽位")
-                .tag("buffer_size", String.valueOf(ringBuffer.getBufferSize()))
-                .register(registry);
+        // 保存 registry 引用，供 registerRingBufferGauge 在 DisruptorConfig 构造完 RingBuffer 后回调注册
+        this.registry = registry;
 
+        // ===== Gauge：方法引用接入，不持字段（注册到 registry 即可由 Reporter 按 name 取）=====
+        // 注意：RingBuffer Gauge 不在此处注册——由 DisruptorConfig.ringBuffer() 显式调用
+        // registerRingBufferGauge() 注册，避免构造期循环依赖
         Gauge.builder("fx.history_buffer.size", historyBuffer,
                         hb -> (double) hb.size())
                 .description("历史队列当前堆积条数")
@@ -129,6 +133,20 @@ public class FxMetrics {
                 .distributionStatisticExpiry(Duration.ofMinutes(1))
                 .distributionStatisticBufferLength(5)
                 .register(r);
+    }
+
+    /**
+     * 注册 RingBuffer 容量 Gauge。由 DisruptorConfig 在 ringBuffer() @Bean 方法内、
+     * Disruptor 构造完成后调用，避免 FxMetrics 直接依赖 RingBuffer Bean 造成的
+     * 构造期循环依赖（disruptorConfig → historyFlusher → fxMetrics → ringBuffer → disruptorConfig）。
+     *
+     * @param ringBuffer 已构造完成的 RingBuffer 实例
+     */
+    public void registerRingBufferGauge(RingBuffer<FxRateEvent> ringBuffer) {
+        Gauge.builder("fx.ring_buffer.remaining_capacity", ringBuffer, rb -> (double) rb.remainingCapacity())
+                .tag("buffer_size", String.valueOf(ringBuffer.getBufferSize()))
+                .description("RingBuffer 剩余可写槽位")
+                .register(registry);
     }
 
     // ===== Counter 语义化方法 =====

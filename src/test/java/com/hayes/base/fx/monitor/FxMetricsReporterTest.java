@@ -43,7 +43,8 @@ class FxMetricsReporterTest {
         FxRateLatestBuffer latestBuffer = new FxRateLatestBuffer();
         FxProperties props = new FxProperties();
         FxRateHistoryBuffer historyBuffer = new FxRateHistoryBuffer(props);
-        metrics = new FxMetrics(registry, ringBuffer, latestBuffer, historyBuffer);
+        metrics = new FxMetrics(registry, latestBuffer, historyBuffer);
+        metrics.registerRingBufferGauge(ringBuffer);
         reporter = new FxMetricsReporter(metrics, registry, props);
     }
 

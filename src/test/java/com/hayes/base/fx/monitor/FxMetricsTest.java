@@ -48,7 +48,8 @@ class FxMetricsTest {
         FxProperties props = new FxProperties();
         historyBuffer = new FxRateHistoryBuffer(props);
 
-        metrics = new FxMetrics(registry, ringBuffer, latestBuffer, historyBuffer);
+        metrics = new FxMetrics(registry, latestBuffer, historyBuffer);
+        metrics.registerRingBufferGauge(ringBuffer);
     }
 
     @AfterEach

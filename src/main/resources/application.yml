@@ -63,3 +63,23 @@ app:
     retry-backoff-ms: 10,50,200
     # 全部重试失败时写入 DLQ 表（HARD-GATE Q-C）
     dlq-enabled: true
+    # 双通道异步批量落库配置
+    flush:
+      # 结构化指标日志（FxMetricsReporter）输出间隔（ms）
+      # 60000 = 每 60s 输出一行 [fx-metrics] JSON 快照；<=0 时 Reporter Bean 整体不注册
+      metrics-log-interval-ms: 60000
+
+# ==========================================================
+# Actuator 监控端点
+# 默认暴露在业务端口 8080/actuator/*；生产若非纯内网环境，
+# 应额外配置 management.server.port 或加 spring-security 鉴权
+# ==========================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        # 仅暴露 metrics + health，避免泄漏 env / configprops
+        include: metrics,health
+  endpoint:
+    metrics:
+      enabled: true

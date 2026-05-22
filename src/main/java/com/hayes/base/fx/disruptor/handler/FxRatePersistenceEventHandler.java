@@ -5,6 +5,7 @@ import com.hayes.base.fx.buffer.FxRateLatestBuffer;
 import com.hayes.base.fx.buffer.LatestKey;
 import com.hayes.base.fx.disruptor.FxRateEvent;
 import com.hayes.base.fx.flusher.FxRateHistoryFlusher;
+import com.hayes.base.fx.monitor.FxMetrics;
 import com.lmax.disruptor.EventHandler;
 import lombok.extern.slf4j.Slf4j;
 
@@ -22,6 +23,11 @@ import lombok.extern.slf4j.Slf4j;
  * <p>
  * Sequence 语义：Handler 返回即推进，Disruptor 槽位立即可复用，生产者不再被消费速度拖累。
  * 丢数据窗口：JVM 进程崩溃时内存 buffer 未 flush 的部分会丢——上游需具备重推能力。
+ * <p>
+ * 监控：
+ * - 二次 offer 仍失败 → {@link FxMetrics#incHistoryReject}（历史通道真丢，P1 告警）；
+ * - 外层兜底 catch → {@link FxMetrics#incHandlerUnexpectedError}（线上"buffer 没数据但 handler 沉默"
+ *   现在能被发现，不必只靠翻日志）。
  */
 @Slf4j
 public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> {
@@ -31,17 +37,20 @@ public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> 
     private final FxRateLatestBuffer latestBuffer;
     private final FxRateHistoryBuffer historyBuffer;
     private final FxRateHistoryFlusher historyFlusher;
+    private final FxMetrics metrics;
 
     public FxRatePersistenceEventHandler(int myIndex,
                                          int workerCount,
                                          FxRateLatestBuffer latestBuffer,
                                          FxRateHistoryBuffer historyBuffer,
-                                         FxRateHistoryFlusher historyFlusher) {
+                                         FxRateHistoryFlusher historyFlusher,
+                                         FxMetrics metrics) {
         this.myIndex = myIndex;
         this.workerCount = workerCount;
         this.latestBuffer = latestBuffer;
         this.historyBuffer = historyBuffer;
         this.historyFlusher = historyFlusher;
+        this.metrics = metrics;
     }
 
     @Override
@@ -64,6 +73,8 @@ public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> 
                 historyFlusher.flushNow();
                 if (!historyBuffer.offer(forHis)) {
                     // 仍然失败 → 记 ERROR 日志 + 单条走老 persist 路径兜底（含 DLQ）
+                    // 历史通道真丢一条
+                    metrics.incHistoryReject();
                     log.error("[fx-rate] history buffer full after flushNow, fallback to sync persist. traceId={} ccyPair={}",
                             forHis.getTraceId(), forHis.getCcyPair());
                     // 注：此处不调 persistenceService.persist——Handler 不应持久化同步调用，
@@ -76,6 +87,8 @@ public class FxRatePersistenceEventHandler implements EventHandler<FxRateEvent> 
             }
         } catch (Throwable ex) {
             // 兜底不让异常冒出，否则 Disruptor 会停止
+            // 外层兜底：未预期异常计数，便于发现"handler 沉默"问题
+            metrics.incHandlerUnexpectedError();
             log.error("[fx-rate] handler#{} 未预期异常 traceId={} ccyPair={} channelCd={}",
                     myIndex, event.getTraceId(), event.getCcyPair(), event.getChannelCd(), ex);
         }

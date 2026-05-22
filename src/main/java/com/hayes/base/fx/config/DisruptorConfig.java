@@ -6,6 +6,7 @@ import com.hayes.base.fx.disruptor.FxRateEvent;
 import com.hayes.base.fx.disruptor.FxRateEventFactory;
 import com.hayes.base.fx.disruptor.handler.FxRatePersistenceEventHandler;
 import com.hayes.base.fx.flusher.FxRateHistoryFlusher;
+import com.hayes.base.fx.monitor.FxMetrics;
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.BusySpinWaitStrategy;
 import com.lmax.disruptor.RingBuffer;
@@ -15,6 +16,7 @@ import com.lmax.disruptor.YieldingWaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
@@ -35,6 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *    "先停 Disruptor → 再停 Flushers"：Spring 的 SmartLifecycle stop 按 phase 降序触发，
  *    Flushers 使用 MAX_VALUE-100，自然晚于本组件停止，从而能接住 in-flight 事件进入 buffer 后
  *    的最后一次 drain。
+ * <p>
+ * 4. 循环依赖处理：FxMetrics 也需要 RingBuffer 才能注册 Gauge，而 RingBuffer 是本类的 @Bean。
+ *    解决方案：注入 {@link ObjectProvider}&lt;FxMetrics&gt; 延迟解析，在 {@link #ringBuffer()}
+ *    方法体内、Disruptor 已构造完成后再调 {@code getObject()}——此时 Spring 才会真正实例化
+ *    FxMetrics（其构造器消费 RingBuffer Bean）→ 返回给我们透传给 handlers。
  */
 @Slf4j
 @Configuration
@@ -45,17 +52,20 @@ public class DisruptorConfig implements SmartLifecycle {
     private final FxRateLatestBuffer latestBuffer;
     private final FxRateHistoryBuffer historyBuffer;
     private final FxRateHistoryFlusher historyFlusher;
+    private final ObjectProvider<FxMetrics> metricsProvider;
     private Disruptor<FxRateEvent> disruptor;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public DisruptorConfig(DisruptorProperties props,
                            FxRateLatestBuffer latestBuffer,
                            FxRateHistoryBuffer historyBuffer,
-                           FxRateHistoryFlusher historyFlusher) {
+                           FxRateHistoryFlusher historyFlusher,
+                           ObjectProvider<FxMetrics> metricsProvider) {
         this.props = props;
         this.latestBuffer = latestBuffer;
         this.historyBuffer = historyBuffer;
         this.historyFlusher = historyFlusher;
+        this.metricsProvider = metricsProvider;
     }
 
     /**
@@ -82,12 +92,15 @@ public class DisruptorConfig implements SmartLifecycle {
                 resolveWaitStrategy(props.getWaitStrategy())
         );
 
+        // 通过 ObjectProvider 延迟解析，打破 RingBuffer ↔ FxMetrics 的构造依赖环
+        FxMetrics metrics = metricsProvider.getObject();
+
         // 构建 N 个分片 handler；传给 handleEventsWith 的是"并行"订阅，每个都会看到全部 sequence，
         // 但 handler 内部按 sequence % N == myIndex 过滤——语义等价于 WorkerPool
         FxRatePersistenceEventHandler[] handlers = new FxRatePersistenceEventHandler[workerCount];
         for (int i = 0; i < workerCount; i++) {
             handlers[i] = new FxRatePersistenceEventHandler(
-                    i, workerCount, latestBuffer, historyBuffer, historyFlusher);
+                    i, workerCount, latestBuffer, historyBuffer, historyFlusher, metrics);
         }
         disruptor.handleEventsWith(handlers);
 

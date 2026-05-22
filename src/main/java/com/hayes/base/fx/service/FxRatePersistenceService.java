@@ -8,6 +8,7 @@ import com.hayes.base.fx.entity.FxXrInfDlq;
 import com.hayes.base.fx.mapper.FxXrInfDlqMapper;
 import com.hayes.base.fx.mapper.FxXrInfHisMapper;
 import com.hayes.base.fx.mapper.FxXrInfMapper;
+import com.hayes.base.fx.monitor.FxMetrics;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -27,6 +28,12 @@ import java.util.List;
  * <p>
  * 注意：@Transactional 只在通过 Spring 代理调用时生效，所以 doPersist / writeDlq 必须由
  * 外部方法（persist）走 Spring Bean 引用（this 自注入）触发。
+ * <p>
+ * 监控接入：
+ * - 每次进入第 i≥1 次重试 → {@link FxMetrics#incPersistRetry}（DB 抖动早期信号）；
+ * - attempts 全败 → {@link FxMetrics#incPersistGiveup}（与 dlq.write 不重叠，DLQ 可 disabled）；
+ * - DLQ 成功写入 → {@link FxMetrics#incDlqWrite}（P1 告警）；
+ * - DLQ 自身失败 → {@link FxMetrics#incDlqWriteFailure}（P0：数据真丢）。
  */
 @Slf4j
 @Service
@@ -37,6 +44,7 @@ public class FxRatePersistenceService {
     private final FxXrInfHisMapper fxXrInfHisMapper;
     private final FxXrInfDlqMapper fxXrInfDlqMapper;
     private final FxProperties fxProps;
+    private final FxMetrics metrics;
     /** 自注入以保证 @Transactional 生效（内部方法调用要走代理） */
     private final org.springframework.context.ApplicationContext appCtx;
 
@@ -52,6 +60,10 @@ public class FxRatePersistenceService {
         FxRatePersistenceService self = appCtx.getBean(FxRatePersistenceService.class);
 
         for (int i = 0; i < attempts; i++) {
+            if (i > 0) {
+                // 进入第 2 次及以后的尝试 = 真实"重试"，对齐 spec：early DB 抖动信号
+                metrics.incPersistRetry();
+            }
             try {
                 self.doPersist(event);
                 if (i > 0) {
@@ -69,12 +81,18 @@ public class FxRatePersistenceService {
         }
 
         // 全部重试失败 —— 打 ERROR 日志 + 按配置写 DLQ
+        // 全部重试失败 → 计数；与 dlq.write 不重叠（DLQ 可被关闭）
+        metrics.incPersistGiveup();
         log.error("[fx-rate] persist FINALLY failed after {} attempts. traceId={} ccyPair={} channelCd={}",
                 attempts, event.getTraceId(), event.getCcyPair(), event.getChannelCd(), last);
         if (fxProps.isDlqEnabled()) {
             try {
                 self.writeDlq(event, last);
+                // DLQ 成功写入（P1 告警）
+                metrics.incDlqWrite();
             } catch (Throwable dlqEx) {
+                // P0：DLQ 也写失败 = 数据真丢，必须独立计数
+                metrics.incDlqWriteFailure();
                 log.error("[fx-rate] DLQ write failed. traceId={}", event.getTraceId(), dlqEx);
             }
         }

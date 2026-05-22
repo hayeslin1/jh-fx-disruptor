@@ -4,6 +4,7 @@ import com.hayes.base.fx.buffer.FxRateLatestBuffer;
 import com.hayes.base.fx.buffer.LatestKey;
 import com.hayes.base.fx.config.FxProperties;
 import com.hayes.base.fx.disruptor.FxRateEvent;
+import com.hayes.base.fx.monitor.FxMetrics;
 import com.hayes.base.fx.service.FxRatePersistenceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.SmartLifecycle;
@@ -27,6 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * - {@link #start} 开启调度；
  * - {@link #stop} 停调度并执行最后一次 flush，保证 shutdown 时 buffer 被排空；
  * - phase 设为较大值，保证在 Disruptor（DisposableBean）之后停，接住 in-flight。
+ * <p>
+ * 监控：每次 flush 调 {@link FxMetrics#recordLatestFlush}（Timer + DS）；
+ * 整批失败降级时调 {@link FxMetrics#incLatestFallback}。
  */
 @Slf4j
 @Component
@@ -35,16 +39,19 @@ public class FxRateLatestFlusher implements SmartLifecycle {
     private final FxRateLatestBuffer buffer;
     private final FxRatePersistenceService persistenceService;
     private final FxProperties.Flush flushProps;
+    private final FxMetrics metrics;
 
     private ScheduledExecutorService scheduler;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public FxRateLatestFlusher(FxRateLatestBuffer buffer,
                                FxRatePersistenceService persistenceService,
-                               FxProperties fxProps) {
+                               FxProperties fxProps,
+                               FxMetrics metrics) {
         this.buffer = buffer;
         this.persistenceService = persistenceService;
         this.flushProps = fxProps.getFlush();
+        this.metrics = metrics;
     }
 
     @Override
@@ -137,12 +144,15 @@ public class FxRateLatestFlusher implements SmartLifecycle {
             long t0 = System.nanoTime();
             try {
                 persistenceService.doPersistLatestBatch(chunk);
+                // 成功路径：记录批量耗时 + batchSize 分布
+                metrics.recordLatestFlush(chunk.size(), System.nanoTime() - t0);
                 if (log.isDebugEnabled()) {
                     log.debug("[fx-flusher-latest] flushed chunk size={} costNanos={}",
                             chunk.size(), System.nanoTime() - t0);
                 }
             } catch (Throwable ex) {
-                // 整批失败 → 逐条走老 persist 路径（内含重试 + DLQ）
+                // 整批失败 → 降级逐条；同时计数 fallback
+                metrics.incLatestFallback();
                 log.warn("[fx-flusher-latest] batch failed, fallback to per-event persist. size={} reason={}",
                         chunk.size(), ex.getMessage());
                 for (FxRateEvent e : chunk) {

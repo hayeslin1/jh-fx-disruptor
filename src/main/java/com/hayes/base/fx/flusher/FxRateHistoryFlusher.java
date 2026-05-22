@@ -3,6 +3,7 @@ package com.hayes.base.fx.flusher;
 import com.hayes.base.fx.buffer.FxRateHistoryBuffer;
 import com.hayes.base.fx.config.FxProperties;
 import com.hayes.base.fx.disruptor.FxRateEvent;
+import com.hayes.base.fx.monitor.FxMetrics;
 import com.hayes.base.fx.service.FxRatePersistenceService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.SmartLifecycle;
@@ -23,6 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 因为那一路径会重复 UPSERT；TODO：后续拆成独立历史路径）。
  * <p>
  * 生命周期同 {@link FxRateLatestFlusher}：SmartLifecycle，stop 时强制排干队列。
+ * <p>
+ * 监控：成功调 {@link FxMetrics#recordHistoryFlush}；正常调度与 shutdown 两处 fallback
+ * 都调 {@link FxMetrics#incHistoryFallback}（shutdown 阶段问题不能被吞）。
  */
 @Slf4j
 @Component
@@ -31,16 +35,19 @@ public class FxRateHistoryFlusher implements SmartLifecycle {
     private final FxRateHistoryBuffer buffer;
     private final FxRatePersistenceService persistenceService;
     private final FxProperties.Flush flushProps;
+    private final FxMetrics metrics;
 
     private ScheduledExecutorService scheduler;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public FxRateHistoryFlusher(FxRateHistoryBuffer buffer,
                                 FxRatePersistenceService persistenceService,
-                                FxProperties fxProps) {
+                                FxProperties fxProps,
+                                FxMetrics metrics) {
         this.buffer = buffer;
         this.persistenceService = persistenceService;
         this.flushProps = fxProps.getFlush();
+        this.metrics = metrics;
     }
 
     @Override
@@ -123,11 +130,15 @@ public class FxRateHistoryFlusher implements SmartLifecycle {
         long t0 = System.nanoTime();
         try {
             persistenceService.doPersistHistoryBatch(batch);
+            // 成功路径：记录批量耗时 + batchSize 分布
+            metrics.recordHistoryFlush(drained, System.nanoTime() - t0);
             if (log.isDebugEnabled()) {
                 log.debug("[fx-flusher-history] flushed size={} costNanos={}",
                         drained, System.nanoTime() - t0);
             }
         } catch (Throwable ex) {
+            // 整批失败 → 降级逐条；计数 fallback
+            metrics.incHistoryFallback();
             // 整批失败 → 逐条走老 persist（注意：会重复 UPSERT 最新态，但幂等安全）
             log.warn("[fx-flusher-history] batch failed, fallback to per-event persist. size={} reason={}",
                     drained, ex.getMessage());
@@ -151,9 +162,14 @@ public class FxRateHistoryFlusher implements SmartLifecycle {
                 return;
             }
             try {
+                long t0 = System.nanoTime();
                 persistenceService.doPersistHistoryBatch(batch);
+                // shutdown 阶段同样计入正常 flush 指标，保留可观测性
+                metrics.recordHistoryFlush(drained, System.nanoTime() - t0);
                 log.info("[fx-flusher-history] shutdown drain size={}", drained);
             } catch (Throwable ex) {
+                // shutdown 阶段降级也必须计入，否则停机期间问题被吞
+                metrics.incHistoryFallback();
                 log.error("[fx-flusher-history] shutdown drain failed, fallback per-event. size={}",
                         drained, ex);
                 for (FxRateEvent e : batch) {

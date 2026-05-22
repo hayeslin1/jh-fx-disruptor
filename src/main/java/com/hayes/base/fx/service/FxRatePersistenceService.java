@@ -80,8 +80,7 @@ public class FxRatePersistenceService {
             }
         }
 
-        // 全部重试失败 —— 打 ERROR 日志 + 按配置写 DLQ
-        // 全部重试失败 → 计数；与 dlq.write 不重叠（DLQ 可被关闭）
+        // 全部重试失败：计数 → 日志 → 按配置写 DLQ（giveup 与 dlq.write 不重叠，DLQ 可被关闭）
         metrics.incPersistGiveup();
         log.error("[fx-rate] persist FINALLY failed after {} attempts. traceId={} ccyPair={} channelCd={}",
                 attempts, event.getTraceId(), event.getCcyPair(), event.getChannelCd(), last);

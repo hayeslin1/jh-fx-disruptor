@@ -5,16 +5,20 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.Environment;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 应用启动类
  * <p>
  * 作用：Spring Boot 工程入口，加载自动配置并启动内嵌容器。
  * 包扫描：默认扫描 {@code com.hayes.base.fx} 及其子包；
- * {@link MapperScan} 明确扫描 MyBatis Mapper 接口包。
+ * {@link MapperScan} 明确扫描 MyBatis Mapper 接口包；
+ * {@link EnableScheduling} 启用 @Scheduled（FxMetricsReporter 依赖此注解，
+ * 不加则 reporter 永远不会触发）。
  */
 @SpringBootApplication
 @MapperScan("com.hayes.base.fx.mapper")
+@EnableScheduling
 public class Application {
 
     /**
